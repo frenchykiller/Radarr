@@ -1,4 +1,11 @@
-using System;
+import os
+import re
+
+with open("src/Radarr.Http/Authentication/AuthenticationBuilderExtensions.cs", "r") as f:
+    content = f.read()
+
+# Apply imports manually
+imports = """using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
@@ -19,9 +26,12 @@ using NzbDrone.Common.Http.Dispatchers;
 using NzbDrone.Core.Authentication;
 using NzbDrone.Core.Configuration;
 
-namespace Radarr.Http.Authentication
-{
-    
+namespace Radarr.Http.Authentication"""
+
+content = re.sub(r'using System;.*?namespace Radarr\.Http\.Authentication', imports, content, flags=re.DOTALL)
+
+# Replace the AddAppAuthentication block with the new one
+new_methods = """
     public static class AuthenticationBuilderExtensions
     {
         private const string AuthorizedProperty = "radarr.authorized";
@@ -316,6 +326,9 @@ namespace Radarr.Http.Authentication
             return Task.CompletedTask;
         }
     }
+"""
 
-}
-}
+content = re.sub(r'public static class AuthenticationBuilderExtensions.*?\}[\s\n]*\}', new_methods + "\n}", content, flags=re.DOTALL)
+
+with open("src/Radarr.Http/Authentication/AuthenticationBuilderExtensions.cs", "w") as f:
+    f.write(content)
