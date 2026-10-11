@@ -73,33 +73,88 @@ namespace Radarr.Http.Authentication
 
         private static AuthenticationBuilder AddOidc(this AuthenticationBuilder authenticationBuilder, string name)
         {
+            authenticationBuilder.Services.AddOptions<CookieAuthenticationOptions>(CookieAuthenticationDefaults.AuthenticationScheme)
+                .Configure<IConfigFileProvider>((options, configFileProvider) =>
+                {
+                    var instanceName = GetCleanInstanceName(configFileProvider.InstanceName);
+
+                    options.Cookie.Name = $"{instanceName}OIDC";
+                    options.AccessDeniedPath = "/login?loginFailed=true";
+                    options.LoginPath = "/login";
+                    options.ReturnUrlParameter = "returnUrl";
+                    options.ExpireTimeSpan = TimeSpan.FromDays(7);
+                    options.SlidingExpiration = true;
+                    options.Cookie.IsEssential = true;
+                    options.Events.OnValidatePrincipal = context =>
+                    {
+                        var configuredUser = configFileProvider.OidcUserIdentifier;
+
+                        if (configFileProvider.EffectiveAuthenticationMethod() == AuthenticationType.Oidc &&
+                            configuredUser.IsNotNullOrWhiteSpace() &&
+                            string.Equals(context.Principal?.FindFirst("user")?.Value, configuredUser, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return Task.CompletedTask;
+                        }
+
+                        context.RejectPrincipal();
+
+                        return context.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+                    };
+
+                    options.Events.OnRedirectToLogin = context => EventOnRedirectCookiesLogin(context, 401);
+                    options.Events.OnRedirectToAccessDenied = context => EventOnRedirectCookiesLogin(context, 403);
+                });
+
             authenticationBuilder.Services.AddOptions<OpenIdConnectOptions>(name)
                 .Configure<IConfigFileProvider, ICertificateValidationService>((options, configFileProvider, certificateValidationService) =>
                 {
+                    options.CorrelationCookie.SameSite = Microsoft.AspNetCore.Http.SameSiteMode.Lax;
+                    options.NonceCookie.SameSite = Microsoft.AspNetCore.Http.SameSiteMode.Lax;
+
+                    if (configFileProvider.AuthenticationMethod != AuthenticationType.Oidc ||
+                        !configFileProvider.IsOidcConfigured())
+                    {
+                        options.Authority = "https://localhost";
+                        options.ClientId = "Radarr";
+
+                        return;
+                    }
+
                     options.Authority = configFileProvider.OidcAuthority;
                     options.ClientId = configFileProvider.OidcClientId;
                     options.ClientSecret = configFileProvider.OidcClientSecret;
+                    options.RequireHttpsMetadata = false;
                     options.ResponseType = "code";
-                    options.UsePkce = true;
-                    options.GetClaimsFromUserInfoEndpoint = true;
-                    options.MapInboundClaims = false;
+                    options.ResponseMode = "query";
                     options.BackchannelHttpHandler = GetBackchannelHttpHandler(certificateValidationService);
-
                     options.Scope.Clear();
 
-                    var scopes = AuthenticationConfigurationExtensions.GetOidcScopes(configFileProvider.OidcScopes);
-
-                    foreach (var scope in scopes)
+                    foreach (var scope in AuthenticationConfigurationExtensions.GetOidcScopes(configFileProvider.OidcScopes).Distinct(StringComparer.Ordinal))
                     {
                         options.Scope.Add(scope);
                     }
 
-                    options.Events.OnRedirectToIdentityProvider = context =>
+                    options.MapInboundClaims = false;
+                    options.GetClaimsFromUserInfoEndpoint = true;
+                    options.SaveTokens = true;
+
+                    options.Events.OnTicketReceived = context =>
                     {
-                        if (context.Request.Path.StartsWithSegments("/api"))
+                        var idToken = context.Properties?.GetTokenValue("id_token");
+
+                        context.Properties?.StoreTokens(idToken.IsNullOrWhiteSpace()
+                            ? Array.Empty<AuthenticationToken>()
+                            : [new AuthenticationToken { Name = "id_token", Value = idToken }]);
+
+                        if (context.Properties?.Items.ContainsKey(AuthorizedProperty) == true)
                         {
-                            context.Response.StatusCode = 401;
+                            return Task.CompletedTask;
+                        }
+
+                        if (!TryAuthorize(configFileProvider, context.Principal, null))
+                        {
                             context.HandleResponse();
+                            context.Response.Redirect(configFileProvider.UrlBase + "/login?ssoFailed=true");
                         }
 
                         return Task.CompletedTask;
@@ -302,7 +357,9 @@ namespace Radarr.Http.Authentication
 
         private static Task EventOnRedirectCookiesLogin(RedirectContext<CookieAuthenticationOptions> context, int statusCode)
         {
-            if (context.Request.Path.StartsWithSegments("/api"))
+            if (context.Request.Path.StartsWithSegments("/api") ||
+                string.Equals(context.Request.Query[HeaderNames.XRequestedWith], "XMLHttpRequest", StringComparison.Ordinal) ||
+                string.Equals(context.Request.Headers[HeaderNames.XRequestedWith], "XMLHttpRequest", StringComparison.Ordinal))
             {
                 context.Response.Headers[HeaderNames.Location] = context.RedirectUri;
                 context.Response.StatusCode = statusCode;
