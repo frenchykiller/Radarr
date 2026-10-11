@@ -6,7 +6,6 @@ using System.Net.Security;
 using System.Security.Claims;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -31,7 +30,7 @@ namespace Radarr.Http.Authentication
         private static readonly Regex CookieNameRegex =
             new Regex(@"[^a-z0-9]+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-        private static readonly Lock BackchannelHttpHandlerLock = new();
+        private static readonly object BackchannelHttpHandlerLock = new();
 
         private static SocketsHttpHandler _backchannelHttpHandler;
 
@@ -295,7 +294,7 @@ namespace Radarr.Http.Authentication
         private static string GetCleanInstanceName(string instanceName)
         {
             // Replace diacritics and replace non-word characters to ensure cookie name doesn't contain any valid URL characters not allowed in cookie names
-            instanceName = instanceName.RemoveDiacritics();
+            instanceName = instanceName.RemoveAccent();
             instanceName = CookieNameRegex.Replace(instanceName, string.Empty);
 
             return instanceName;
@@ -316,6 +315,4 @@ namespace Radarr.Http.Authentication
             return Task.CompletedTask;
         }
     }
-
-}
 }
